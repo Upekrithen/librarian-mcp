@@ -1,25 +1,84 @@
 # Librarian MCP
 
 **A real, measured alternative to "bigger context windows."**
-Pre-curated canonical memory + prose/code provenance checking, delivered as a [Model Context Protocol](https://modelcontextprotocol.io) server that works across Claude Code, Cursor, VSCode (via Continue), and any MCP-capable client.
+Pre-curated canonical memory + prose/code provenance checking + benchmark metrics, delivered as a [Model Context Protocol](https://modelcontextprotocol.io) server that works across Claude Code, Cursor, VSCode (via Continue), and any MCP-capable client.
 
 ## What it does
 
-Two tools, both exposed via MCP:
+Five tools, all exposed via MCP:
 
-1. **`librarian_context`** — loads a tightly-curated "memory packet" of your project's canonical truth (pricing, people, decisions, rules, API contracts, patent numbers — whatever you declare canonical) at the start of every AI-assisted session. Eliminates the "forgets by prompt #21" failure mode documented across Gemini 3.1 Pro, long-context Claude, and Copilot.
-
-2. **`prose_provenance`** — deterministic + Opus-assisted drift detection between two versions of any document. Catches silently-removed voice anchors ("Keystones"), stale canonical numbers reintroduced, section structure changes, register shifts, softened stakes, and disclaimer insertion. Works on letters, specs, contracts, and (next release) code refactors.
+| Tool | What it does | Added |
+|---|---|---|
+| **`librarian_context`** | Intent-aware canonical memory packet. Loads curated preload content scoped to your query intent (outreach, architecture, benchmark, founder voice, etc.). Eliminates the "forgets by prompt #21" failure mode. | v0.1.0 (stub), **v0.2.0** (intent-aware) |
+| **`prose_provenance`** | Deterministic drift detection between two document versions. Catches silently-removed voice anchors, stale canonical numbers, section changes, register shifts. | v0.1.0 |
+| **`record_measurement`** | Log a single benchmark measurement (vendor, model, condition, accuracy, cost, latency) to local JSONL. | **v0.2.0** |
+| **`metrics_summary`** | Per-vendor and per-model aggregation of recorded measurements. Shows accuracy lift, cost savings, cache hit rate. | **v0.2.0** |
+| **`opt_in_share`** | Toggle anonymous metrics sharing flag. Default OFF. Commons dashboard POST endpoint ships in a future release. | **v0.2.0** |
 
 ## Why we built this
 
-Independently measured result (Painter Benchmark, April 18, 2026, three models × 75 platform-specific questions, each twice):
+Independently measured result (Eyewitness Benchmark R10, April 2026, eight models across four vendors, 1,200 graded calls, inter-rater kappa 0.883/0.850):
 
-- **Without the Librarian:** ~8 out of 100 correct
-- **With the Librarian:** 93–97 out of 100 correct, across every AI tested (Haiku 4.5, Sonnet 4.6, Opus 4.7)
-- **4.3× more right answers per dollar of compute**
+- **Without the Librarian (COLD):** mean 8.7% correct
+- **With the Librarian (HOT):** mean 94.8% correct — **86.1 percentage-point lift**
+- **Haiku 4.5 (cheapest) ties Opus 4.7 (most expensive)** at 19x cost difference
+- **4.3x more right answers per dollar of compute**
 
-Applied inside Microsoft Copilot's inference path, the same architecture recovers an estimated **$750M/year** in waste. Inside Anthropic's developer tools, **~$130M/year**. Both numbers sourced from [R9 Empirical Test Companion Paper, B108](https://liana-banyan.com/papers/r9-empirical) (to be published; contact for preprint).
+Applied inside Microsoft Copilot's inference path, the same architecture recovers an estimated **$750M/year** in waste. Inside Anthropic's developer tools, **~$130M/year**. Full methodology in the R9 Empirical Test Companion Paper.
+
+## `librarian_context` — Intent API
+
+```python
+librarian_context(intent="outreach", max_tokens=16000)
+```
+
+| Intent | What it loads | Approx. tokens |
+|---|---|---|
+| `""` (default) | Base R9-v2 preload only | ~4,500 |
+| `"canonical"` | Base + canonical values + canonical laws | ~15,000 |
+| `"outreach"` | Base + canonical + Opening Gambit + letter queue + Cephas + Glass Door + Witness | ~30,000 |
+| `"architecture"` | Base + canonical + Pledge + IP split + Medallion + Pedestal Stake | ~20,000 |
+| `"founder_voice"` | Base + Rhetorical Keystones + Pine Books + Anachronism + Cloyd + Three-clock | ~10,000 |
+| `"benchmark"` | Base + R10 results + R9 brief + 75-Q bank + rubric + posture disclosure | ~10,000 |
+| `"operational"` | Union of `outreach` + `canonical` | ~30,000 |
+
+**List inputs** for union queries: `intent='["benchmark", "founder_voice"]'`
+
+Returns:
+```json
+{
+  "packet": "...markdown...",
+  "sections_included": ["r9v2_base.md", "canonical/canonical_values.yaml", ...],
+  "token_count": 14832,
+  "source_version": "a1b2c3d4e5f6",
+  "truncation_note": null
+}
+```
+
+## `metrics_summary` — Schema
+
+```json
+{
+  "total_calls": 1200,
+  "per_vendor": {
+    "anthropic": {
+      "calls": 600,
+      "hot_accuracy": 95.3,
+      "cold_baseline_est": 8.2,
+      "dollars_saved_est": 42.17,
+      "cache_hit_rate": 50.0
+    }
+  },
+  "per_model": {
+    "claude-haiku-4-5-20251001": { "..." : "..." }
+  },
+  "cumulative_hot_accuracy": 94.8,
+  "cumulative_cold_baseline_est": 8.7,
+  "cumulative_dollars_saved_est": 127.50,
+  "opt_in_share": false,
+  "since": "all_time"
+}
+```
 
 ## Pricing
 
@@ -38,13 +97,20 @@ Because you shouldn't have to pick between your AI assistants. MCP servers work 
 
 ## Install
 
-### Quick start (local, Python)
+### Quick start (local, Python 3.10+)
 
 ```bash
 git clone https://github.com/liana-banyan/librarian-mcp.git
 cd librarian-mcp
 pip install -e .
-librarian-mcp serve  # starts on stdio for MCP clients
+librarian-mcp  # starts on stdio for MCP clients
+```
+
+### With optional dependencies
+
+```bash
+pip install -e ".[all]"   # tiktoken (accurate token counts) + anthropic + pyyaml
+pip install -e ".[dev]"   # + pytest, ruff, mypy for development
 ```
 
 ### Claude Code
@@ -71,9 +137,18 @@ Add to `~/.cursor/mcp.json`:
 
 See [docs/continue-integration.md](docs/continue-integration.md).
 
+## Development
+
+```bash
+pip install -e ".[dev,all]"
+ruff check src/ tests/          # lint
+mypy --strict src/librarian_mcp/  # type check
+pytest -v                        # test (34 tests)
+```
+
 ## Status
 
-**April 20, 2026 — v0.1.0 (early access).** Prose Provenance tool is live and measured. Librarian Context tool ships next release. Roadmap in [docs/roadmap.md](docs/roadmap.md).
+**April 21, 2026 — v0.2.0.** Intent-aware `librarian_context` live with bundled preload (R10-validated). Benchmark metrics recording live. Prose Provenance tool upgraded to v0.2.0. PyPI name `librarian-mcp` reserved. CI/CD staged.
 
 ## License
 

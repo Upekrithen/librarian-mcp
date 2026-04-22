@@ -1,109 +1,80 @@
 """
-Librarian MCP Server — v0.1.0 (April 20, 2026)
+Librarian MCP Server — v0.2.0 (April 21, 2026)
 
-Exposes two tools to any MCP-capable client (Claude Code, Cursor, Continue, Zed, ...):
+Five tools exposed via MCP to any capable client:
 
-  1. librarian_context    — loads canonical memory packet for the current project
-  2. prose_provenance     — drift detection between two versions of any document
-
-Status:
-  * librarian_context is live with basic file-discovery mode. Full R9 memory-packet
-    architecture (priority-ordered, per-query re-ranked) ships in v0.2.0.
-  * prose_provenance is live with deterministic checks (Keystones, canonical numbers,
-    structure delta). Opus-grader semantic layer requires an Anthropic API key.
+  1. librarian_context    — intent-aware canonical memory packet (v0.2.0)
+  2. prose_provenance     — deterministic drift detection between document versions
+  3. record_measurement   — log benchmark measurement to local JSONL
+  4. metrics_summary      — per-vendor / per-model aggregation of recorded measurements
+  5. opt_in_share         — toggle anonymous sharing flag for metrics
 
 Runtime:
   Uses the FastMCP high-level API from the MCP Python SDK (v1.6+).
-  Run: `python -m librarian_mcp` or `librarian-mcp serve`
+  Run: `python -m librarian_mcp` or `librarian-mcp`
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+
+from librarian_mcp.context import build_packet, log_context_query
+from librarian_mcp.metrics import opt_in_share as _opt_in_share
+from librarian_mcp.metrics import record_measurement as _record_measurement
+from librarian_mcp.metrics import summary as _metrics_summary
 
 mcp = FastMCP(
     "librarian-mcp",
     instructions=(
-        "Pre-curated canonical memory + prose/code provenance checking. "
-        "Two tools: librarian_context (memory packet) and prose_provenance (drift detection). "
-        "v0.1.0"
+        "Pre-curated canonical memory + prose/code provenance checking + benchmark metrics. "
+        "Five tools: librarian_context (intent-aware memory), prose_provenance (drift detection), "
+        "record_measurement / metrics_summary / opt_in_share (benchmark tracking). "
+        "v0.2.0"
     ),
 )
 
 
-# ─── TOOL 1: LIBRARIAN CONTEXT ────────────────────────────────────────────────
+# ─── TOOL 1: LIBRARIAN CONTEXT (v0.2.0) ─────────────────────────────────────
 
 
 @mcp.tool()
 def librarian_context(
-    project_root: Annotated[str, "Absolute path to the project root directory"],
-    query: Annotated[Optional[str], "Optional query for per-query re-ranking (v0.2.0)"] = None,
-    max_tokens: Annotated[int, "Maximum token budget for the memory packet"] = 8000,
-) -> dict:
-    """Load the canonical memory packet for a project.
+    intent: Annotated[
+        str,
+        'Intent string or JSON list. Options: "" (base only), "canonical", '
+        '"outreach", "architecture", "founder_voice", "benchmark", "operational". '
+        'Pass a JSON array for union: \'["benchmark", "founder_voice"]\'',
+    ] = "",
+    max_tokens: Annotated[int, "Maximum token budget for the memory packet (default 16000)"] = 16_000,
+) -> dict[str, Any]:
+    """Load the canonical memory packet for a specific intent.
 
-    Scans the project root for canonical source files (canonical_values.yaml,
-    CANONICAL.md, .cursor/rules/*.mdc, .canonical/values.yaml) and assembles
-    them into a single curated markdown packet sized to the client's token budget.
+    Returns a curated markdown packet assembled from the preload directory,
+    scoped to the requested intent. Supports single intent strings and
+    JSON-encoded lists for union queries. Enforces token budget with
+    priority-based truncation.
 
-    Returns a dict with: packet (markdown), sources (file paths), tokens_estimated,
-    version, and status notes.
+    Returns: packet (markdown), sections_included (file paths), token_count,
+    source_version (git SHA), truncation_note (if any files were removed).
     """
-    root = Path(project_root)
-    if not root.is_dir():
-        return {"error": f"Project root not found: {project_root}"}
+    parsed_intent: str | list[str] = intent
+    if intent.startswith("["):
+        try:
+            parsed_intent = json.loads(intent)
+        except json.JSONDecodeError:
+            pass
 
-    sources: list[str] = []
-    chunks: list[str] = []
-
-    candidates = [
-        "canonical_values.yaml",
-        "CANONICAL.md",
-        "canonical_values.json",
-        ".canonical/values.yaml",
-        ".canonical/values.json",
-    ]
-
-    # Also scan .cursor/rules/ for any .mdc files
-    rules_dir = root / ".cursor" / "rules"
-    if rules_dir.is_dir():
-        for mdc in sorted(rules_dir.glob("*.mdc")):
-            candidates.append(str(mdc.relative_to(root)))
-
-    for candidate in candidates:
-        p = root / candidate
-        if p.exists() and p.is_file():
-            try:
-                text = p.read_text(encoding="utf-8")
-                sources.append(str(p))
-                chunks.append(f"## {p.name}\n\n{text}")
-            except (OSError, UnicodeDecodeError):
-                continue
-
-    packet = "\n\n---\n\n".join(chunks) if chunks else (
-        "_No canonical source files found. "
-        "Create `CANONICAL.md` or `canonical_values.yaml` at your project root._"
-    )
-
-    # Rough token estimate: ~4 chars per token
-    truncated = packet[: max_tokens * 4]
-    tokens_est = min(len(packet) // 4, max_tokens)
-
-    return {
-        "packet": truncated,
-        "sources": sources,
-        "tokens_estimated": tokens_est,
-        "version": "v0.1.0",
-        "note": "Full R9 memory-packet architecture (priority-ordered, per-query re-ranked) ships in v0.2.0.",
-    }
+    result = build_packet(intent=parsed_intent, max_tokens=max_tokens)
+    log_context_query(parsed_intent, result["token_count"])
+    return result
 
 
-# ─── TOOL 2: PROSE PROVENANCE ─────────────────────────────────────────────────
+# ─── TOOL 2: PROSE PROVENANCE ────────────────────────────────────────────────
+
 
 def _load_text(path: str) -> str | None:
     """Safely load text from a file path."""
@@ -157,9 +128,11 @@ def prose_provenance(
     canonical_path: Annotated[str, "Path to the canonical (original/golden) version of the document"],
     candidate_path: Annotated[str, "Path to the candidate (new/revised) version to check against canonical"],
     doc_type: Annotated[str, "Document type: letter | scaffold | proposal | tribute | generic"] = "generic",
-    keystones: Annotated[Optional[str], "JSON array of keystone phrases to check (voice anchors that must be preserved)"] = None,
+    keystones: Annotated[
+        Optional[str], "JSON array of keystone phrases to check (voice anchors that must be preserved)"
+    ] = None,
     canonical_numbers: Annotated[Optional[str], "JSON array of canonical numbers/values to verify"] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Deterministic drift detection between two versions of any document.
 
     Checks for:
@@ -180,7 +153,6 @@ def prose_provenance(
 
     drift_score = 0
 
-    # Parse optional JSON args
     ks_phrases: list[str] = []
     if keystones:
         try:
@@ -195,34 +167,29 @@ def prose_provenance(
         except json.JSONDecodeError:
             cn_values = [n.strip() for n in canonical_numbers.split(",") if n.strip()]
 
-    # Check keystones
     ks_missing, ks_preserved = _find_missing_phrases(canonical_text, candidate_text, ks_phrases)
     drift_score += len(ks_missing) * 3
 
-    # Check canonical numbers
     cn_missing, cn_preserved = _find_missing_phrases(canonical_text, candidate_text, cn_values)
     drift_score += len(cn_missing) * 2
 
-    # Section header delta
     canon_sections = _extract_sections(canonical_text)
     cand_sections = _extract_sections(candidate_text)
     sections_added = [s for s in cand_sections if s not in canon_sections]
     sections_removed = [s for s in canon_sections if s not in cand_sections]
     drift_score += len(sections_removed) * 2 + len(sections_added)
 
-    # Paragraph count delta
     canon_paras = _count_paragraphs(canonical_text)
     cand_paras = _count_paragraphs(candidate_text)
     para_delta = cand_paras - canon_paras
     if abs(para_delta) > 5:
         drift_score += abs(para_delta) // 3
 
-    # Character-length ratio (catch major expansions/contractions)
     len_ratio = len(candidate_text) / max(len(canonical_text), 1)
     if len_ratio < 0.5 or len_ratio > 2.0:
         drift_score += 5
 
-    report = {
+    return {
         "canonical_path": canonical_path,
         "candidate_path": candidate_path,
         "doc_type": doc_type,
@@ -238,16 +205,83 @@ def prose_provenance(
         "paragraph_count_candidate": cand_paras,
         "paragraph_delta": para_delta,
         "length_ratio": round(len_ratio, 3),
-        "version": "v0.1.0",
-        "note": "Opus-grader semantic layer available in v0.2.0 with Anthropic API key.",
+        "version": "v0.2.0",
     }
 
-    return report
+
+# ─── TOOL 3: RECORD MEASUREMENT ─────────────────────────────────────────────
 
 
-# ─── CLI ENTRY POINT ──────────────────────────────────────────────────────────
+@mcp.tool()
+def record_measurement(
+    session_id: Annotated[str, "Session identifier for this benchmark run"],
+    vendor: Annotated[str, "Vendor name: anthropic, google, openai, perplexity, etc."],
+    model: Annotated[str, "Model identifier, e.g. claude-haiku-4-5-20251001"],
+    condition: Annotated[str, "Test condition: HOT (with librarian) or COLD (without)"],
+    question_id: Annotated[str, "Question identifier from the benchmark bank"],
+    correct: Annotated[bool, "Whether the answer was graded correct"],
+    input_tokens: Annotated[int, "Input tokens consumed"],
+    output_tokens: Annotated[int, "Output tokens generated"],
+    cost_usd: Annotated[float, "Cost in USD for this call"],
+    latency_s: Annotated[float, "Latency in seconds for this call"],
+) -> dict[str, Any]:
+    """Record a single benchmark measurement to the local JSONL metrics file.
 
-def main():
+    Appends one line to ~/.librarian-mcp/metrics.jsonl. Used by benchmark
+    harnesses (R10 cross-vendor, Eyewitness) to track accuracy and cost.
+    """
+    _record_measurement(
+        session_id=session_id,
+        vendor=vendor,
+        model=model,
+        condition=condition,
+        question_id=question_id,
+        correct=correct,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+        latency_s=latency_s,
+    )
+    return {"status": "recorded", "session_id": session_id, "question_id": question_id}
+
+
+# ─── TOOL 4: METRICS SUMMARY ────────────────────────────────────────────────
+
+
+@mcp.tool()
+def metrics_summary(
+    since_timestamp: Annotated[
+        Optional[str],
+        "ISO timestamp to filter from (inclusive). Omit for all-time summary.",
+    ] = None,
+) -> dict[str, Any]:
+    """Return per-vendor and per-model aggregation of all recorded measurements.
+
+    Reads ~/.librarian-mcp/metrics.jsonl and computes accuracy, cost savings,
+    and cache hit rate broken down by vendor and model.
+    """
+    return _metrics_summary(since_timestamp=since_timestamp)
+
+
+# ─── TOOL 5: OPT-IN SHARE ───────────────────────────────────────────────────
+
+
+@mcp.tool()
+def opt_in_share(
+    enabled: Annotated[bool, "True to enable anonymous sharing, False to disable"] = True,
+) -> dict[str, Any]:
+    """Toggle anonymous metrics sharing. Default is OFF.
+
+    When enabled, summary data may be shared to a commons dashboard in a
+    future release. The POST endpoint is not yet implemented (deferred to K425).
+    """
+    return _opt_in_share(enabled=enabled)
+
+
+# ─── CLI ENTRY POINT ─────────────────────────────────────────────────────────
+
+
+def main() -> None:
     """Run the Librarian MCP server on stdio transport."""
     mcp.run(transport="stdio")
 
