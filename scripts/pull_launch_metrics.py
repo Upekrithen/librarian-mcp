@@ -43,7 +43,7 @@ def get_cloud_run_visits(since: str) -> int | str:
     """Query Cloud Run structured logs for direct visit count."""
     filter_str = (
         f'resource.type="cloud_run_revision" '
-        f'resource.labels.service_name="librarian-mcp" '
+        f'resource.labels.service_name="librarian-mcp-hosted" '
         f'httpRequest.requestUrl:"/"\n'
         f'timestamp>="{since}T00:00:00Z"'
     )
