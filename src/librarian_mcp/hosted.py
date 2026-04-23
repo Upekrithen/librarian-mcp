@@ -24,10 +24,12 @@ import logging
 import os
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -54,7 +56,8 @@ _request_log: dict[str, list[float]] = defaultdict(list)
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Response:
-        client_ip = request.client.host if request.client else "unknown"
+        forwarded = request.headers.get("x-forwarded-for", "")
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
         now = time.time()
         window = _request_log[client_ip]
         cutoff = now - 60.0
@@ -77,12 +80,14 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         start = time.time()
         response = await call_next(request)
         elapsed = time.time() - start
+        forwarded = request.headers.get("x-forwarded-for", "")
+        real_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
         logger.info(json.dumps({
             "path": str(request.url.path),
             "method": request.method,
             "referrer": request.headers.get("referer", ""),
             "user_agent": request.headers.get("user-agent", ""),
-            "client_ip": request.client.host if request.client else "unknown",
+            "client_ip": real_ip,
             "status": response.status_code,
             "latency_ms": round(elapsed * 1000, 1),
         }))
@@ -93,6 +98,12 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 
 hosted_mcp = FastMCP(
     "librarian-mcp-hosted",
+    stateless_http=True,
+    host="0.0.0.0",
+    port=PORT,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
     instructions=(
         "Hosted read-only Librarian MCP endpoint. "
         "Two tools: librarian_context (intent-aware canonical memory) and "
@@ -269,10 +280,20 @@ async def landing_page(request: Request) -> Response:
 
 # ─── Starlette app assembly ──────────────────────────────────────────────────
 
+mcp_app = hosted_mcp.streamable_http_app()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    async with hosted_mcp.session_manager.run():
+        yield
+
+
 routes = [
     Route("/", landing_page),
     Route("/health", health),
     Route("/api/playground", playground_api, methods=["POST"]),
+    Mount("/mcp", app=mcp_app),
 ]
 
 if HOSTED_DIR.exists() and (HOSTED_DIR / "static").exists():
@@ -280,15 +301,12 @@ if HOSTED_DIR.exists() and (HOSTED_DIR / "static").exists():
 
 app = Starlette(
     routes=routes,
+    lifespan=lifespan,
     middleware=[
         Middleware(RequestLogMiddleware),
         Middleware(RateLimitMiddleware),
     ],
 )
-
-# Mount the MCP streamable-http transport at /mcp
-mcp_app = hosted_mcp.streamable_http_app()
-app.mount("/mcp", mcp_app)
 
 
 def main() -> None:
