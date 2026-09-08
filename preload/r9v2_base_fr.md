@@ -1,5 +1,5 @@
-<!-- Translator's note: French draft prepared with OpenAI Codex. Native-speaker
-review and attestation are pending; this is not a human-reviewed translation.
+<!-- Translator's note: French translation drafted with OpenAI Codex. Astrawo
+has reviewed the translation and self-attested as a native French speaker.
 English headings, canonical figures, YAML, identifiers and ratified English
 phrases are intentionally preserved for structural and provenance comparison.
 The source's claims are translated faithfully, not independently endorsed. -->
