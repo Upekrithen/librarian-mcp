@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from librarian_mcp.hosted import prose_provenance as hosted_prose_provenance
 from librarian_mcp.server import prose_provenance
 
 
@@ -65,6 +70,44 @@ class TestProseProvenance:
         )
         assert "2,267" in result["canonical_numbers_missing"]
         assert "83.3%" in result["canonical_numbers_missing"]
+
+    @pytest.mark.parametrize("tool", [prose_provenance, hosted_prose_provenance], ids=["stdio", "hosted"])
+    def test_numeric_canonical_values(
+        self, tmp_path: Path, tool: Callable[..., dict[str, Any]]
+    ) -> None:
+        canonical = "# Stats\n\nThere are 2267 innovations and 83.3 percent creator keep.\n"
+        candidate = "# Stats\n\nThere are many innovations and 83.3 percent creator keep.\n"
+        (tmp_path / "canonical.md").write_text(canonical, encoding="utf-8")
+        (tmp_path / "candidate.md").write_text(candidate, encoding="utf-8")
+
+        result = tool(
+            canonical_path=str(tmp_path / "canonical.md"),
+            candidate_path=str(tmp_path / "candidate.md"),
+            canonical_numbers=json.dumps([2267, 83.3]),
+        )
+
+        assert result["canonical_numbers_missing"] == ["2267"]
+        assert result["canonical_numbers_preserved"] == ["83.3"]
+        assert result["drift_score"] == 2
+
+    @pytest.mark.parametrize("tool", [prose_provenance, hosted_prose_provenance], ids=["stdio", "hosted"])
+    def test_mixed_numeric_and_formatted_canonical_values(
+        self, tmp_path: Path, tool: Callable[..., dict[str, Any]]
+    ) -> None:
+        canonical = "# Stats\n\nThere are 2267 innovations and 83.3% creator keep.\n"
+        candidate = "# Stats\n\nThere are many innovations and fair creator keep.\n"
+        (tmp_path / "canonical.md").write_text(canonical, encoding="utf-8")
+        (tmp_path / "candidate.md").write_text(candidate, encoding="utf-8")
+
+        result = tool(
+            canonical_path=str(tmp_path / "canonical.md"),
+            candidate_path=str(tmp_path / "candidate.md"),
+            canonical_numbers=json.dumps([2267, "83.3%"]),
+        )
+
+        assert result["canonical_numbers_missing"] == ["2267", "83.3%"]
+        assert result["canonical_numbers_preserved"] == []
+        assert result["drift_score"] == 4
 
     def test_section_changes_detected(self, tmp_path: Path) -> None:
         canonical = "# Title\n\n## Section A\n\nText\n\n## Section B\n\nText\n"
