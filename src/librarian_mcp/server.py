@@ -131,7 +131,10 @@ def prose_provenance(
     keystones: Annotated[
         Optional[str], "JSON array of keystone phrases to check (voice anchors that must be preserved)"
     ] = None,
-    canonical_numbers: Annotated[Optional[str], "JSON array of canonical numbers/values to verify"] = None,
+    canonical_numbers: Annotated[
+        Optional[str],
+        "JSON array of canonical strings or numbers to verify. Use strings to preserve formatting.",
+    ] = None,
 ) -> dict[str, Any]:
     """Deterministic drift detection between two versions of any document.
 
@@ -163,7 +166,7 @@ def prose_provenance(
     cn_values: list[str] = []
     if canonical_numbers:
         try:
-            cn_values = json.loads(canonical_numbers)
+            cn_values = [str(value) for value in json.loads(canonical_numbers)]
         except json.JSONDecodeError:
             cn_values = [n.strip() for n in canonical_numbers.split(",") if n.strip()]
 

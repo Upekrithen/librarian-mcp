@@ -181,7 +181,10 @@ def prose_provenance(
     candidate_path: Annotated[str, "Path to the candidate (new/revised) version to check against canonical"],
     doc_type: Annotated[str, "Document type: letter | scaffold | proposal | tribute | generic"] = "generic",
     keystones: Annotated[Optional[str], "JSON array of keystone phrases to check"] = None,
-    canonical_numbers: Annotated[Optional[str], "JSON array of canonical numbers/values to verify"] = None,
+    canonical_numbers: Annotated[
+        Optional[str],
+        "JSON array of canonical strings or numbers to verify. Use strings to preserve formatting.",
+    ] = None,
 ) -> dict[str, Any]:
     """Deterministic drift detection between two versions of any document."""
     canonical_text = _load_text(canonical_path)
@@ -202,7 +205,7 @@ def prose_provenance(
     cn_values: list[str] = []
     if canonical_numbers:
         try:
-            cn_values = json.loads(canonical_numbers)
+            cn_values = [str(value) for value in json.loads(canonical_numbers)]
         except json.JSONDecodeError:
             cn_values = [n.strip() for n in canonical_numbers.split(",") if n.strip()]
 
